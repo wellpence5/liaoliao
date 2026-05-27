@@ -1,6 +1,33 @@
+import os
 import socket
 import threading
 import time
+import sys
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM 
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes, serialization
+
+def keygen():
+    private_key = x25519.X25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    return (private_key, public_key)
+
+
+
+
+
+
+
+
+
+
+
+
+listenLog = []
+host = sys.argv[1]
+local_port = int(sys.argv[2])
+remote_port = int(sys.argv[3])
 
 def listen(host, port):
     server = socket.socket()
@@ -10,6 +37,7 @@ def listen(host, port):
     print(f"[*]Listening on {host}:{port}")
     conn, addr = server.accept()
     print(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
+    listenLog.append(addr)
     server.close()
     return conn
 
@@ -23,8 +51,50 @@ def connect(host, port):
         except ConnectionRefusedError:
             soc.close()
             print("Retrying....")
-            time.sleep(1)
+            time.sleep(10)
+
+def race(host, local_port, remote_port):
+    result = []
+    done = threading.Event()
+
+    def listen_wrapper():
+        sock = listen("0.0.0.0", local_port)
+        result.append(sock)
+        done.set()
+
+    def connect_wrapper():
+        sock = connect(host, remote_port)
+        result.append(sock)
+        done.set()
+
+    listener = threading.Thread(target=listen_wrapper)
+    connecter = threading.Thread(target=connect_wrapper)
+    listener.daemon = True
+    connecter.daemon = True
+    listener.start()
+    connecter.start()
+    done.wait()
+    return result[0]
+
+def recv_loop(sock):
+   while True:
+       mumbl = sock.recv(4096)
+       if mumbl == b"":
+           print("Connected peer has disconnected.")
+           break
+       print (mumbl.decode())
+
+def send_loop(sock):
+    while True:
+        msg = bytes(input(), "utf-8")
+        if msg == b"":
+            continue
+        sock.send(msg)
     
-#conn = listen("0.0.0.0", 5000)
-connect("localhost", 5000)
-#print("Got  connection!", conn)
+def main(host, local_port, remote_port):
+    sock = race(host, local_port, remote_port)
+    recv = threading.Thread(target=recv_loop ,args=(sock,))
+    recv.start()
+    send_loop(sock)
+
+main(host, local_port, remote_port)

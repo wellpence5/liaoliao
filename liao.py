@@ -13,6 +13,20 @@ def keygen():
     public_key = private_key.public_key()
     return (private_key, public_key)
 
+def key_exchange(sock, private_key, public_key):
+    serialized_key = public_key.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+    sock.sendall(serialized_key)
+    peer_serialized_key = sock.recv(4096)
+    peer_public_key = x25519.X25519PublicKey.from_public_bytes(peer_serialized_key)
+    shared_key = private_key.exchange(peer_public_key)
+    derived_key =  HKDF(
+    algorithm=hashes.SHA256(),
+    length=32,
+    salt=None,
+    info=b"chat"
+    ).derive(shared_key)
+    return derived_key
+
 
 
 

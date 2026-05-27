@@ -7,6 +7,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes, serialization
+import curses
+from curses import wrapper
 
 def keygen(): # Function to generate the public and private keys
     private_key = x25519.X25519PrivateKey.generate()
@@ -91,29 +93,72 @@ def race(host, local_port, remote_port): # This is to launch both listening and 
     done.wait() # Won't continue until a peer has been heard or spoken to idk
     return result[0]
 
-def recv_loop(sock, derived_key): # Function to receive texts
+
+def recv_loop(sock, derived_key, win, lock, messages): # Function to receive texts
    while True:
        mumbl = decrypt(derived_key, (sock.recv(4096)))
        if mumbl == b"":
-           print("Connected peer has disconnected.") # If nothing was sent(Like literally 0 bytes) it means the other guy died :c
+           messages.append("Peer has Disconnected!") # If nothing was sent(Like literally 0 bytes) it means the other guy died :c
+           with lock:
+               draw_messages(win, messages)
            break
-       print (mumbl.decode()) # Forever while loop. My favourite
+       messages.append(mumbl.decode())
+       with lock:
+           draw_messages(win, messages)
 
-def send_loop(sock, derived_key):
+def send_loop(sock, derived_key, win, lock, messages):
+    current_txt = ""
     while True:
-        text = input()
-        if text == "": # If you just press 'Enter', it'll just skip down a line and not crash the script. Guess how I found out
-            continue
-        msg = encrypt(derived_key, (bytes(text, "utf-8")))
-        sock.send(msg) # sock stands for socket btw, not foot gloves
+        ch = win.getch()
+        if ch == 10: # 'Enter' is ch == 10. Backspace is ch==127. Random ahh number assignments
+            msg = encrypt(derived_key, (bytes(current_txt, "utf-8")))
+            sock.send(msg) # sock stands for socket btw, not foot gloves
+            messages.append(current_txt)
+            current_txt = ""
+            with lock:
+                draw_messages(win, messages)
+                draw_input(win, "")
+        elif ch == 127:
+            current_txt = current_txt[:-1]
+            with lock:
+                draw_input(win, "Me: " + current_txt)
+        else:
+            current_txt +=  chr(ch)
+            with lock:
+                draw_input(win, "Me: " + current_txt)
+            
     
-def main(host, local_port, remote_port): # main
+def main(stdscr, host, local_port, remote_port): # main
+    height, width = stdscr.getmaxyx()
+    msg_win = curses.newwin(height - 3, width, 0, 0)
+    input_win = curses.newwin(3, width, height - 3, 0)
     sock = race(host, local_port, remote_port)
     private_key, public_key = keygen()
     derived_key = key_exchange(sock, private_key, public_key)
-
-    recv = threading.Thread(target=recv_loop ,args=(sock, derived_key))
+    lock2 = threading.Lock()
+    messages = []
+    recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
     recv.start()
-    send_loop(sock, derived_key)
+    send_loop(sock, derived_key, input_win, lock2, messages)
 
-main(host, local_port, remote_port)
+
+
+
+
+def draw_messages(win, messages):
+    win.clear()
+    height, width = win.getmaxyx()
+    visible = messages[-(height):]
+    for i, msg in enumerate(visible):
+        win.addstr(i, 0, msg)
+    win.refresh()
+
+def draw_input(win, current_text):
+    win.clear()
+    height, width = win.getmaxyx()
+    win.addstr(0, 0, "-"*width)
+    win.addstr(1, 0, "> " + current_text)
+    win.refresh()
+
+
+curses.wrapper(lambda stdscr: main(stdscr, host, local_port, remote_port))

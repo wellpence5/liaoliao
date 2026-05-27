@@ -23,19 +23,21 @@ def key_exchange(sock, private_key, public_key):
     algorithm=hashes.SHA256(),
     length=32,
     salt=None,
-    info=b"chat"
-    ).derive(shared_key)
+    info=b"chat" ).derive(shared_key)
     return derived_key
 
+def encrypt(key, plaintext):
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    return nonce + ciphertext
 
-
-
-
-
-
-
-
-
+def decrypt(key, data):
+    nonce = data[:12]
+    ciphertext = data[12:]
+    aesgcm = AESGCM(key)
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    return plaintext
 
 
 listenLog = []
@@ -90,25 +92,29 @@ def race(host, local_port, remote_port):
     done.wait()
     return result[0]
 
-def recv_loop(sock):
+def recv_loop(sock, derived_key):
    while True:
-       mumbl = sock.recv(4096)
+       mumbl = decrypt(derived_key, (sock.recv(4096)))
        if mumbl == b"":
            print("Connected peer has disconnected.")
            break
        print (mumbl.decode())
 
-def send_loop(sock):
+def send_loop(sock, derived_key):
     while True:
-        msg = bytes(input(), "utf-8")
-        if msg == b"":
+        text = input()
+        if text == "":
             continue
+        msg = encrypt(derived_key, (bytes(text, "utf-8")))
         sock.send(msg)
     
 def main(host, local_port, remote_port):
     sock = race(host, local_port, remote_port)
-    recv = threading.Thread(target=recv_loop ,args=(sock,))
+    private_key, public_key = keygen()
+    derived_key = key_exchange(sock, private_key, public_key)
+
+    recv = threading.Thread(target=recv_loop ,args=(sock, derived_key))
     recv.start()
-    send_loop(sock)
+    send_loop(sock, derived_key)
 
 main(host, local_port, remote_port)

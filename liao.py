@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 import curses
 from curses import wrapper
 import argparse
+import hashlib
 
 # Better way to parse the arguments entered.
 parser = argparse.ArgumentParser(prog="liao.py", usage="%(prog)s [host] [local_port] [remote_port]")
@@ -232,6 +233,11 @@ def main(stdscr, host, local_port, remote_port): # main. Calling the functions i
     sock = race(host, local_port, remote_port, msg_win, messages)
     private_key, public_key = keygen()
     derived_key = key_exchange(sock, private_key, public_key)
+    chat_hash = hashlib.sha256(derived_key).hexdigest()
+    trun_chat_hash = chat_hash[:6]
+    messages.append(f"<<<Your chat hash code is <{trun_chat_hash}>, ensure it matches with your peer before continuing chatting.>>>")
+    with lock2:
+        draw_messages(msg_win, messages)
     recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
     recv.daemon = True
     recv.start()

@@ -9,6 +9,17 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes, serialization
 import curses
 from curses import wrapper
+import argparse
+
+# Better way to parse the arguments entered.
+parser = argparse.ArgumentParser(prog="liao.py", usage="%(prog)s [host] [local_port] [remote_port]")
+parser.add_argument("host", help="The remote host you are connecting to.")
+parser.add_argument("local_port", help="The port you want to use. Recommened is 5000", type=int)
+parser.add_argument("remote_port", help="The host's port", type=int)
+argus = parser.parse_args()
+host = argus.host
+local_port = argus.local_port
+remote_port = argus.remote_port
 
 # There are 2 windows; The message window an the input window.
 def draw_messages(win, messages):
@@ -25,6 +36,21 @@ def draw_input(win, current_text):
     win.addstr(0, 0, "-"*width)
     win.addstr(1, 0, "> " + current_text)
     win.refresh()
+
+# Realised that getting your ip is too much work, so this just tells you what your ip is.
+def get_my_ip(win):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        error_msg = []
+        error_msg.append("Please check your network interface!")
+        draw_messages(win, error_msg)
+        return "unavailable"
+
 
 # This function is to ensure all bits sent are received and processed together. TCP may send bits at a time which ould inevitably bring errors when decrypting since it doesnt have the complete ciphertext.
 def recv_all(sock, n):   
@@ -73,55 +99,52 @@ def decrypt(key, data): # Decrypt Function
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext
 
-host = sys.argv[1] # Reads the arguments provided when you launched this script
-local_port = int(sys.argv[2])
-remote_port = int(sys.argv[3])
+
 
 # one peer will be the listener and the other the connecter. Depends on who is faster
-def listen(host, port, win): # When you debugging code nd lowkey realise that you're gay
-    welcome_message = []
+def listen(host, port, win, message): # When you debugging code nd lowkey realise that you're gay
     server = socket.socket() 
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # When script is closed, this just tells computer to recycle the port that was being used. Normally, there is like a 30 second cooldown of some sort so this just skips it.
     server.bind((host, port))
     server.listen(1)
-    welcome_message.append(f"[*]Listening on {host}:{port}")
+    message.append(f"[*]Listening on {host}:{port}")
     conn, addr = server.accept() 
-    welcome_message.append(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
-    welcome_message.append("Type '/bye' to exit the chat")
-    draw_messages(win, welcome_message)
+    message.append(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
+    draw_messages(win, message)
     server.close() # THis is to stop listening if it already got a peer. Might change later to accomodate multiple peers at the same time. Groupchat sort of thing.
     return conn
 
-def connect(host, port, win):
-    while True: 
-        welcome_message = []
+def connect(host, port, win, done, message):
+    while not done.is_set(): # If listen() on race, this stops connect() from running forever until its killed later by daemon.
         try:
             soc = socket.socket()
             soc.connect((host, port))
-            welcome_message.append(f"Connected to {host}:{port}")
-            welcome_message.append("Type '/bye' to exit the chat")
-            draw_messages(win, welcome_message)
+            message.append(f"[*]Connected to {host}:{port}")
+            draw_messages(win, message)
             return soc
         except ConnectionRefusedError: # This error is gotten when the peer is'nt listning(Has no open port)
             soc.close()
-            welcome_message.append("Retrying....")
-            draw_messages(win, welcome_message)
-            time.sleep(5) # The number can be random. Its just the time taken for the timeout
+            if done.is_set():
+                return None
+            message.append("Retrying....")
+            draw_messages(win, message)
+            time.sleep(2) # The number can be random. Its just the time taken for the timeout
+    return None
 
-def race(host, local_port, remote_port, win): # This is to launch both listening and connecting and whichever gets the peer first wins.(The loser is dumped in hot oil and force fed hummus through their anus)
+def race(host, local_port, remote_port, win, message): # This is to launch both listening and connecting and whichever gets the peer first wins.(The loser is dumped in hot oil and force fed hummus through their anus)
     result = [] # But seriously, this is needed such that both peers can be both server and client
     done = threading.Event() # Threading mentioned (#*#)
 
     def listen_wrapper():
-        sock = listen("0.0.0.0", local_port, win)
+        sock = listen("0.0.0.0", local_port, win, message)
         result.append(sock)
         done.set()
 
     def connect_wrapper():
-        sock = connect(host, remote_port, win)
-        result.append(sock)
-        done.set()
-
+        sock = connect(host, remote_port, win, done, message)
+        if sock:
+            result.append(sock)
+            done.set()
     listener = threading.Thread(target=listen_wrapper)
     connecter = threading.Thread(target=connect_wrapper)
     listener.daemon = True
@@ -155,7 +178,7 @@ def recv_loop(sock, derived_key, win, lock, messages): # Function to receive tex
                     draw_messages(win, messages)
                 break 
             mumbl = decrypt(derived_key, recvd_rawmsg)
-            messages.append(mumbl.decode())
+            messages.append("Peer: " + mumbl.decode())
             with lock:
                 draw_messages(win, messages)
         except OSError:
@@ -172,18 +195,18 @@ def send_loop(sock, derived_key, msg_win, input_win, lock, messages):
             if current_txt == "":
                 continue
             if current_txt == "/bye": # This is the clean exit. Realised that Ctrl + C everytime is just sloppy work
-                current_txt = "Your peer has disconnected!"
+                current_txt = "<<Your Peer has Disconnected!>>"
                 msg = encrypt(derived_key, (bytes(current_txt, "utf-8")))
                 send_msg(sock, msg)
                 sock.close()
                 sys.exit()
             msg = encrypt(derived_key, (bytes(current_txt, "utf-8")))
             send_msg(sock, msg) # sock stands for socket btw, not foot gloves. Refer to Main for the creation of 'sock'
-            messages.append(current_txt)
+            messages.append("Me: " + current_txt)
             current_txt = ""
             with lock:
                 draw_messages(msg_win, messages)
-                draw_input(input_win, "")
+                draw_input(input_win, "Me: ")
         elif ch == 127:
             current_txt = current_txt[:-1] # Just means to delete 1 item from the end
             with lock:
@@ -198,15 +221,21 @@ def main(stdscr, host, local_port, remote_port): # main. Calling the functions i
     height, width = stdscr.getmaxyx()
     msg_win = curses.newwin(height - 3, width, 0, 0)
     input_win = curses.newwin(3, width, height - 3, 0)
-    sock = race(host, local_port, remote_port, msg_win)
+    messages = []
+    lock2 = threading.Lock()
+    ip = get_my_ip(msg_win)
+    messages.append(f"Your outbound ip address is {ip}. Please let your peer know for them to connect!")
+    messages.append("Type '/bye' to exit the chat")
+    with lock2:
+        draw_messages(msg_win, messages)
+    time.sleep(3)
+    sock = race(host, local_port, remote_port, msg_win, messages)
     private_key, public_key = keygen()
     derived_key = key_exchange(sock, private_key, public_key)
-    lock2 = threading.Lock()
-    messages = []
     recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
     recv.daemon = True
     recv.start()
     send_loop(sock, derived_key, msg_win, input_win, lock2, messages)
 
 
-curses.wrapper(lambda stdscr: main(stdscr, host, local_port, remote_port))
+curses.wrapper(lambda stdscr: main(stdscr, host, local_port, remote_port)) # lambda since the curses wrapper NEEDS the stdscr to be passed, but the user is'nt inputting that themselves, and its needed to start main too, yk?

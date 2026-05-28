@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 import curses
 from curses import wrapper
 
+# There are 2 windows; The message window an the input window.
 def draw_messages(win, messages):
     win.clear()
     height, width = win.getmaxyx()
@@ -45,7 +46,7 @@ def key_exchange(sock, private_key, public_key): #Function to exchange keys with
     send_thread = threading.Thread(target=sock.sendall, args=(serialized_key,)) # To avoid deadlocks where one peer fails to initialize recv on time or network lags, leading to receiving a partial key
     send_thread.start()
     peer_serialized_key = recv_all(sock, 32) # Receiving the peer's public key. X25519 are always 32 bytes.
-    send_thread.join()
+    send_thread.join(timeout=10)
     if send_thread.is_alive():
         raise RuntimeError("Key send failure. lol")
     if peer_serialized_key == None:
@@ -76,6 +77,7 @@ host = sys.argv[1] # Reads the arguments provided when you launched this script
 local_port = int(sys.argv[2])
 remote_port = int(sys.argv[3])
 
+# one peer will be the listener and the other the connecter. Depends on who is faster
 def listen(host, port, win): # When you debugging code nd lowkey realise that you're gay
     welcome_message = []
     server = socket.socket() 
@@ -85,21 +87,26 @@ def listen(host, port, win): # When you debugging code nd lowkey realise that yo
     welcome_message.append(f"[*]Listening on {host}:{port}")
     conn, addr = server.accept() 
     welcome_message.append(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
+    welcome_message.append("Type '/bye' to exit the chat")
     draw_messages(win, welcome_message)
     server.close() # THis is to stop listening if it already got a peer. Might change later to accomodate multiple peers at the same time. Groupchat sort of thing.
     return conn
 
-def connect(host, port):
+def connect(host, port, win):
     while True: 
+        welcome_message = []
         try:
             soc = socket.socket()
             soc.connect((host, port))
-            print(f"Connected to {host}:{port}")
+            welcome_message.append(f"Connected to {host}:{port}")
+            welcome_message.append("Type '/bye' to exit the chat")
+            draw_messages(win, welcome_message)
             return soc
         except ConnectionRefusedError: # This error is gotten when the peer is'nt listning(Has no open port)
             soc.close()
-            print("Retrying....")
-            time.sleep(10) # The number can be random. Its just the time taken to timeout
+            welcome_message.append("Retrying....")
+            draw_messages(win, welcome_message)
+            time.sleep(5) # The number can be random. Its just the time taken for the timeout
 
 def race(host, local_port, remote_port, win): # This is to launch both listening and connecting and whichever gets the peer first wins.(The loser is dumped in hot oil and force fed hummus through their anus)
     result = [] # But seriously, this is needed such that both peers can be both server and client
@@ -111,7 +118,7 @@ def race(host, local_port, remote_port, win): # This is to launch both listening
         done.set()
 
     def connect_wrapper():
-        sock = connect(host, remote_port)
+        sock = connect(host, remote_port, win)
         result.append(sock)
         done.set()
 
@@ -140,43 +147,54 @@ def recv_msg(sock):
 
 def recv_loop(sock, derived_key, win, lock, messages): # Function to receive texts
    while True:
-       recvd_rawmsg = recv_msg(sock)
-       if recvd_rawmsg == None:
-           messages.append("Peer has Disconnected!")
-           with lock:
-               draw_messages(win, messages)
-           break 
-       mumbl = decrypt(derived_key, recvd_rawmsg)
-       messages.append(mumbl.decode())
-       with lock:
-           draw_messages(win, messages)
-
-def send_loop(sock, derived_key, win, lock, messages):
+        try:
+            recvd_rawmsg = recv_msg(sock)
+            if recvd_rawmsg == None:
+                messages.append("Peer has Disconnected!")
+                with lock:
+                    draw_messages(win, messages)
+                break 
+            mumbl = decrypt(derived_key, recvd_rawmsg)
+            messages.append(mumbl.decode())
+            with lock:
+                draw_messages(win, messages)
+        except OSError:
+            messages.append("Connection Error. Peer may have disconnected.")
+            with lock:
+                draw_messages(win, messages)
+            break
+            
+def send_loop(sock, derived_key, msg_win, input_win, lock, messages):
     current_txt = ""
     while True:
-        ch = win.getch()
+        ch = input_win.getch()
         if ch == 10: # 'Enter' is ch == 10. Backspace is ch==127. Random ahh number assignments
             if current_txt == "":
                 continue
+            if current_txt == "/bye": # This is the clean exit. Realised that Ctrl + C everytime is just sloppy work
+                current_txt = "Your peer has disconnected!"
+                msg = encrypt(derived_key, (bytes(current_txt, "utf-8")))
+                send_msg(sock, msg)
+                sock.close()
+                sys.exit()
             msg = encrypt(derived_key, (bytes(current_txt, "utf-8")))
             send_msg(sock, msg) # sock stands for socket btw, not foot gloves. Refer to Main for the creation of 'sock'
             messages.append(current_txt)
             current_txt = ""
             with lock:
-                draw_messages(win, messages)
-            with lock:
-                draw_input(win, "")
+                draw_messages(msg_win, messages)
+                draw_input(input_win, "")
         elif ch == 127:
             current_txt = current_txt[:-1] # Just means to delete 1 item from the end
             with lock:
-                draw_input(win, "Me: " + current_txt)
+                draw_input(input_win, "Me: " + current_txt)
         else:
             current_txt +=  chr(ch)
             with lock:
-                draw_input(win, "Me: " + current_txt)
+                draw_input(input_win, "Me: " + current_txt)
             
     
-def main(stdscr, host, local_port, remote_port): # main
+def main(stdscr, host, local_port, remote_port): # main. Calling the functions in order. Clean as hell ngl
     height, width = stdscr.getmaxyx()
     msg_win = curses.newwin(height - 3, width, 0, 0)
     input_win = curses.newwin(3, width, height - 3, 0)
@@ -188,7 +206,7 @@ def main(stdscr, host, local_port, remote_port): # main
     recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
     recv.daemon = True
     recv.start()
-    send_loop(sock, derived_key, input_win, lock2, messages)
+    send_loop(sock, derived_key, msg_win, input_win, lock2, messages)
 
 
 curses.wrapper(lambda stdscr: main(stdscr, host, local_port, remote_port))

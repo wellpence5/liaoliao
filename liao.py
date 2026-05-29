@@ -119,11 +119,13 @@ def connect(host, port, win, done, message):
             time.sleep(2) # The number can be random. Its just the time taken for the timeout
     return None
 
+#listen() was removed and placed inside listen_wrapper() in race()
+
 def race(host, local_port, remote_port, win, message): # This is to launch both listening and connecting and whichever gets the peer first wins.(The loser is dumped in hot oil and force fed hummus through their anus)
     result = [] # But seriously, this is needed such that both peers can be both server and client
     done = threading.Event() # Threading mentioned (#*#)
 
-    def listen_wrapper():
+    def listen_wrapper():# Only the relay_master will flag this. All connecting peers will use connect_wrapper()
         server = socket.socket() 
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((host, local_port))
@@ -132,11 +134,11 @@ def race(host, local_port, remote_port, win, message): # This is to launch both 
         sock, addr = server.accept() 
         message.append(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
         draw_messages(win, message)
-        result.append((sock, True, server))
+        result.append((sock, True, server)) # I know other peers still hve their listen sockets open. This is'nt a bug but a **future feature**. 
         done.set()
 
     def connect_wrapper():
-        sock = connect(host, remote_port, win, done, message)
+        sock = connect(host, remote_port, win, done, message) # Refer to connect()
         if sock:
             result.append((sock, False, None))
             done.set()
@@ -149,22 +151,22 @@ def race(host, local_port, remote_port, win, message): # This is to launch both 
     listener.start() # THis calls both functions btw
     connecter.start()
     done.wait() # Won't continue until a peer has been heard or spoken to idk
-    return result[0]
+    return result[0] #result contains a tuple. Jump to main() to see them in action
 
 # This is used to append the amount of bytes in the message being sent to the start of it. i.e..[4 bytes][message]
 def send_msg (sock, data):
     length = len(data).to_bytes(4, 'big')
-    sock.sendall(length + data)
+    sock.sendall(length + data) # I might add more functionality here to include unique identifiers or usernames to also be appended to the message
 
 # This is to check the bytes the message is supposed to contain when received AND to output the full encrypted message
 def recv_msg(sock):
     raw_length = recv_all(sock, 4)
     if raw_length == None:
-        return None
+        return None 
     length = int.from_bytes(raw_length, 'big')
-    return recv_all(sock, length)
+    return recv_all(sock, length) 
 
-
+# This recv_loop is for other peers who arent the relay master. The relay master gets a special one just for them :D
 def recv_loop(sock, derived_key, win, lock, messages): # Function to receive texts. This is happening at the same time as the main thread(send)
    while True: 
         try:
@@ -172,14 +174,14 @@ def recv_loop(sock, derived_key, win, lock, messages): # Function to receive tex
             if recvd_rawmsg == None:
                 with lock:
                     messages.append("Peer has Disconnected!") # recv_loop is in a constant background thread loop btw. so putting this in prevents appending bugs
-                    draw_messages(win, messages)
-                break 
+                    draw_messages(win, messages) # I will change this when adding usernames, so for now only the RM(relay master) can see in detail who left
+                break                           # I can't do it now because uhhhh no unique id is being carried with the message to show who the author is, all you know is someone suddenly died XoX
             mumbl = decrypt(derived_key, recvd_rawmsg)
             with lock:
                 messages.append("Peer: " + mumbl.decode())
                 draw_messages(win, messages)
         except OSError:
-            with lock:
+            with lock:# "What are all these locks for?" Two people cant write on the same book at the same time. This just waits for whoevers editing it to finish before they edit. to prevent errors. Also seen during viewing
                 messages.append("Connection Error. Peer may have disconnected.")
                 draw_messages(win, messages)
             break
@@ -187,7 +189,7 @@ def recv_loop(sock, derived_key, win, lock, messages): # Function to receive tex
 def send_loop(sock, derived_key, msg_win, input_win, lock, messages):
     current_txt = ""
     while True:
-        ch = input_win.getch()
+        ch = input_win.getch() # ch stands for character since this looks at any key you press. So if you press "F", it gets pushed down the loop and restarts until you press "Enter"
         if ch == 10: # 'Enter' is ch == 10. Backspace is ch==127. Random ahh number assignments
             if current_txt == "":
                 continue
@@ -197,12 +199,12 @@ def send_loop(sock, derived_key, msg_win, input_win, lock, messages):
                 send_msg(sock, msg)
                 sock.close()
                 sys.exit()
-            msg = encrypt(derived_key, (bytes(current_txt, "utf-8")))
+            msg = encrypt(derived_key, (bytes(current_txt, "utf-8"))) # Encryption point
             send_msg(sock, msg) # sock stands for socket btw, not foot gloves. Refer to Main for the creation of 'sock'
             messages.append("Me: " + current_txt)
             current_txt = ""
             with lock:
-                draw_messages(msg_win, messages)
+                draw_messages(msg_win, messages)# This is to show you what sent to you as the sender. Rest assured that the other peer(s) see the same
                 draw_input(input_win, "Me: ")
         elif ch == 127:
             current_txt = current_txt[:-1] # Just means to delete 1 item from the end
@@ -211,23 +213,34 @@ def send_loop(sock, derived_key, msg_win, input_win, lock, messages):
         else:
             current_txt +=  chr(ch)
             with lock:
-                draw_input(input_win, "Me: " + current_txt)
+                draw_input(input_win, "Me: " + current_txt) # Now this is used to constantly show you what you are writing down.
             
-
-def determine_role(sock, is_master):
-    if is_master == True:
+# This function isnt being called in main() or anywhere else for now btw
+def determine_role(sock, is_master): # This is declared redundant and will be edited to be a better verification check
+    if is_master == True:           # Lowkey just caused too many errors and i scrapped it for now since race() produces the boolean to show whether one os relay master or not
         sock.send(bytes([1]))
     else:
         if sock.recv(1) != bytes([1]):
             raise ConnectionError("Invalid handshake")
     return is_master
 
-def listen_for_peers(win, message, peers, lock, server):
-    while True:
+# This is only run by the relay master. It checks for any peer wanting to join the conversation. 
+def listen_for_peers(win, message, peers, lock, server): # Only drawback is that the peer has to know who the relay master is and connect to them directly
+    while True:                                     # But that will be fixed in a later update
         sock, addr = server.accept()
+        with lock:
+            message.append(f"Peer {addr} has joined.")
+            draw_messages(win, message)
+            peers_copy = peers.copy()
+            for peer_addr, peer_data in peers_copy.items():# For loops just to tell everyone someone left. Still encrypted tho
+                if peer_addr != addr:                   # Youre right, i should put these fucking for loops as its own function. Spent like 30 minutes for some stupid bug in one of them
+                    conf_msg = f"Peer {addr} has joined"
+                    group_msg = encrypt(peer_data["key"], (bytes(conf_msg, "utf-8")))
+                    send_msg(peer_data["sock"], group_msg)
         private_key, public_key = keygen()
         derived_key = key_exchange(sock, private_key, public_key)
         with lock:
+            # This is the peer dictionary that holds the peers unique identifier(sock) and key to actually send the encrypted message to them
             peers[addr] = {
                 "sock": sock,
                 "key": derived_key
@@ -237,6 +250,8 @@ def listen_for_peers(win, message, peers, lock, server):
         recv.start()
 
 
+# Here, the message will be unencrypted and reencrypted to everyones unique encryption and sent to everyone. 
+# This isn't a server but a relay. Nothing is stored but immediately sent. 
 def relay_recv(sock, addr, peers, lock, win, message):
     while True:
         try:
@@ -246,16 +261,22 @@ def relay_recv(sock, addr, peers, lock, win, message):
                 with lock:
                     message.append(f"Peer {addr} has left.")
                     draw_messages(win, message)
+                    peers_copy = peers.copy()
+                    for peer_addr, peer_data in peers_copy.items():# For loops just to tell everyone someone left. Still encrypted tho
+                        if peer_addr != addr:
+                            error_msg = f"Peer {addr} has left"
+                            group_msg = encrypt(peer_data["key"], (bytes(error_msg, "utf-8")))
+                            send_msg(peer_data["sock"], group_msg)
                     del peers[addr]
                 break
             decrypted_recvd_msg = decrypt(peers[addr]["key"], recvd_msg)
             with lock:
-                message.append("Peer: " + decrypted_recvd_msg.decode())
+                message.append("Peer: " + decrypted_recvd_msg.decode()) # This will change to show username of sender. Later update tho
                 draw_messages(win, message)
                 peers_copy = peers.copy()
                 for peer_addr, peer_data in peers_copy.items():
                     try:
-                        if peer_addr != addr:
+                        if peer_addr != addr: # This is to skip the sender cause they already gonna see hat they sent. Refer to send_loop()
                             group_msg = encrypt(peer_data["key"], decrypted_recvd_msg)
                             send_msg(peer_data["sock"], group_msg)
                     except OSError:
@@ -268,22 +289,30 @@ def relay_recv(sock, addr, peers, lock, win, message):
                 sock.close()
                 message.append(f"Peer {addr} has left.")
                 draw_messages(win, message)
+                peers_copy = peers.copy()
+                for peer_addr, peer_data in peers_copy.items():
+                    if peer_addr != addr:
+                        error_msg = f"Peer {addr} has left"
+                        group_msg = encrypt(peer_data["key"], (bytes(error_msg, "utf-8")))
+                        send_msg(peer_data["sock"], group_msg)
                 del peers[addr]
             break
 
+# The function carrying the constant mass sending
 def mass_group_send(lock, peers, win, message, current_txt):
     with lock:
-        peers_copy = peers.copy()
+        peers_copy = peers.copy() # We make a copy because if it real one is being read while edited, it gives an error about some value changing
         for peer_addr, peer_data in peers_copy.items():
             try:
                 group_msg = encrypt(peer_data["key"], (bytes(current_txt, "utf-8")))
                 send_msg(peer_data["sock"], group_msg)
             except OSError:
                     peer_data["sock"].close()
-                    message.append(f"Peer {peer_addr} has left.")
+                    message.append(f"Peer {peer_addr} has left.") # Gonna add that for loop here later
                     draw_messages(win, message)
                     del peers[peer_addr]
 
+# relay masters send loop btw. Its only uniqueness is that it sends message to everyone connected, while the normal send_loop() sends to the relay master only.
 def masters_send_loop(peer, lock, msg_win, input_win, message):
     current_txt = ""
     while True:
@@ -293,9 +322,9 @@ def masters_send_loop(peer, lock, msg_win, input_win, message):
                 continue
             if current_txt == "/bye": # This is the clean exit. Realised that Ctrl + C everytime is just sloppy work
                 current_txt = "<<The Relay Master has left. Group has been deleted and your messages will no longer be sent.>>"
-                mass_group_send(lock, peer, msg_win, message, current_txt)  
+                mass_group_send(lock, peer, msg_win, message, current_txt) # FYI, if the relay master leaves, the group chat dies with it. Its a fail-safe of somesort. Not bug but *feature*
                 with lock: 
-                    for peer_addr, peer_data in peer.items():
+                    for peer_addr, peer_data in peer.items(): # ive always hated for loops for some reason
                         peer_data["sock"].close()
                 sys.exit()
             mass_group_send(lock, peer, msg_win, message, current_txt)
@@ -319,45 +348,49 @@ def masters_send_loop(peer, lock, msg_win, input_win, message):
     
 
 def main(stdscr, host, local_port, remote_port): # main. Calling the functions in order. Clean as hell ngl
+    # Just initializing the disply windows
     height, width = stdscr.getmaxyx()
     msg_win = curses.newwin(height - 3, width, 0, 0)
     input_win = curses.newwin(3, width, height - 3, 0)
     messages = []
-    lock2 = threading.Lock()
+    lock2 = threading.Lock() 
     ip = get_my_ip(msg_win)
     messages.append(f"Your outbound ip address is {ip}. Please let your peer know for them to connect!")
     messages.append("Type '/bye' to exit the chat")
     with lock2:
         draw_messages(msg_win, messages)
-    time.sleep(3)
+    time.sleep(3) # This is here to mostly give you time to look at your ip address and reflect about your life choices
     sock, is_master, server = race(host, local_port, remote_port, msg_win, messages)
-    role_bool = is_master
+    role_bool = is_master # I was too lazy to switch out all out for another. And also a reminder to add a verification that peer has connected to relay master
     peers = {}
     private_key, public_key = keygen()
-    if role_bool == True:
+    if role_bool == True: # If you are the relay master, follow this route. Everyone else goes to else
         messages.append("You are the relay master now")
         with lock2:
             draw_messages(msg_win, messages)
+        # This will be done for all peers in listen_for_peers()
         derived_key = key_exchange(sock, private_key, public_key)
         addr = sock.getpeername()
         peers[addr] = {
             "sock": sock,
             "key": derived_key
         }
+        # Setting up threads to run alongside main thread
         relay_recver = threading.Thread(target=relay_recv, args=(sock, addr, peers, lock2, msg_win, messages))
         peer_listener = threading.Thread(target=listen_for_peers, args=(msg_win, messages, peers, lock2, server))
         relay_recver.daemon = True
         peer_listener.daemon = True
         relay_recver.start()
         peer_listener.start()
-        masters_send_loop(peers, lock2, msg_win, input_win, messages)
-    else:
+        masters_send_loop(peers, lock2, msg_win, input_win, messages) # This is what i called the main thread btw
+    else: # Hi everyone else
         derived_key = key_exchange(sock, private_key, public_key)
-        chat_hash = hashlib.sha256(derived_key).hexdigest()
-        trun_chat_hash = chat_hash[:6]
-        messages.append(f"<<<Your chat hash code is <{trun_chat_hash}>, ensure it matches with your peer before continuing chatting.>>>")
-        with lock2:
-            draw_messages(msg_win, messages)
+        # Chat hash will be revised as it is now useless. 
+        #chat_hash = hashlib.sha256(derived_key).hexdigest()
+        #trun_chat_hash = chat_hash[:6]
+        #messages.append(f"<<<Your chat hash code is <{trun_chat_hash}>, ensure it matches with your peer before continuing chatting.>>>")
+        #with lock2:
+        #    draw_messages(msg_win, messages)
         recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
         recv.daemon = True
         recv.start()

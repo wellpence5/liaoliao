@@ -16,7 +16,7 @@ import hashlib
 parser = argparse.ArgumentParser(prog="liao.py", usage="%(prog)s [host] [local_port] [remote_port]")
 parser.add_argument("host", help="The remote host you are connecting to.")
 parser.add_argument("--local_port", "-l", help="The port you want to use. Default is 5000", type=int, default=5000)
-parser.add_argument("--remote_port", "-r", help="The host's port. Default is 5000", type=int, default=5000)
+parser.add_argument("--remote_port", "-r", help="The host's port. Default is 5000", type=int, default=5000) 
 argus = parser.parse_args()
 host = argus.host
 local_port = argus.local_port
@@ -138,14 +138,16 @@ def race(host, local_port, remote_port, win, message): # This is to launch both 
 
     def listen_wrapper():
         sock = listen("0.0.0.0", local_port, win, message)
-        result.append(sock)
+        result.append((sock, True))
         done.set()
 
     def connect_wrapper():
         sock = connect(host, remote_port, win, done, message)
         if sock:
-            result.append(sock)
+            result.append((sock, False))
             done.set()
+    
+        
     listener = threading.Thread(target=listen_wrapper)
     connecter = threading.Thread(target=connect_wrapper)
     listener.daemon = True
@@ -217,7 +219,115 @@ def send_loop(sock, derived_key, msg_win, input_win, lock, messages):
             with lock:
                 draw_input(input_win, "Me: " + current_txt)
             
+
+def determine_role(sock, is_master):
+    if is_master == True:
+        sock.send(bytes([1]))
+    else:
+        if sock.recv(1) != bytes([1]):
+            raise ConnectionError("Invalid handshake")
+    return is_master
+
+def listen_for_peers(port, win, message, peers, lock):
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("0.0.0.0", port))
+    server.listen(1)
+    while True:
+        sock, addr = server.accept()
+        private_key, public_key = keygen()
+        derived_key = key_exchange(sock, private_key, public_key)
+        with lock:
+            peers[addr] = {
+                "sock": sock,
+                "key": derived_key
+            }
+        recv = threading.Thread(target=relay_recv, args=(sock, addr, peers, lock, win, message))
+        recv.daemon = True
+        recv.start()
+
+
+def relay_recv(sock, addr, peers, lock, win, message):
+    while True:
+        try:
+            recvd_msg = recv_msg(sock)
+            if recvd_msg == None:
+                sock.close()
+                with lock:
+                    message.append(f"Peer {addr} has left.")
+                    draw_messages(win, message)
+                    del peers[addr]
+                break
+            decrypted_recvd_msg = decrypt(peers[addr]["key"], recvd_msg)
+            with lock:
+                message.append("Peer: " + decrypted_recvd_msg.decode())
+                draw_messages(win, message)
+                peers_copy = peers.copy()
+                for peer_addr, peer_data in peers_copy.items():
+                    try:
+                        if peer_addr != addr:
+                            group_msg = encrypt(peer_data["key"], decrypted_recvd_msg)
+                            send_msg(peer_data["sock"], group_msg)
+                    except OSError:
+                        peer_data["sock"].close()
+                        message.append(f"Peer {peer_addr} has left.")
+                        draw_messages(win, message)
+                        del peers[peer_addr]
+        except OSError:
+            with lock:
+                sock.close()
+                message.append(f"Peer {addr} has left.")
+                draw_messages(win, message)
+                del peers[addr]
+            break
+
+def mass_group_send(lock, peers, win, message, current_txt):
+    with lock:
+        peers_copy = peers.copy()
+        for peer_addr, peer_data in peers_copy.items():
+            try:
+                group_msg = encrypt(peer_data["key"], (bytes(current_txt, "utf-8")))
+                send_msg(peer_data["sock"], group_msg)
+            except OSError:
+                    peer_data["sock"].close()
+                    message.append(f"Peer {peer_addr} has left.")
+                    draw_messages(win, message)
+                    del peers[peer_addr]
+
+def masters_send_loop(peer, lock, msg_win, input_win, message):
+    current_txt = ""
+    while True:
+        ch = input_win.getch()
+        if ch == 10: # 'Enter' is ch == 10. Backspace is ch==127. Random ahh number assignments
+            if current_txt == "":
+                continue
+            if current_txt == "/bye": # This is the clean exit. Realised that Ctrl + C everytime is just sloppy work
+                current_txt = "<<Your Peer has Disconnected!>>"
+                mass_group_send(lock, peer, msg_win, message, current_txt)  
+                with lock: 
+                    for peer_addr, peer_data in peer.items():
+                        peer_data["sock"].close()
+                sys.exit()
+            mass_group_send(lock, peer, msg_win, message, current_txt)
+            message.append("Me: " + current_txt)
+            current_txt = ""
+            with lock:
+                draw_messages(msg_win, message)
+                draw_input(input_win, "Me: ")
+        elif ch == 127:
+            current_txt = current_txt[:-1] # Just means to delete 1 item from the end
+            with lock:
+                draw_input(input_win, "Me: " + current_txt)
+        else:
+            current_txt +=  chr(ch)
+            with lock:
+                draw_input(input_win, "Me: " + current_txt)
+
+
     
+
+    
+
 def main(stdscr, host, local_port, remote_port): # main. Calling the functions in order. Clean as hell ngl
     height, width = stdscr.getmaxyx()
     msg_win = curses.newwin(height - 3, width, 0, 0)
@@ -230,18 +340,38 @@ def main(stdscr, host, local_port, remote_port): # main. Calling the functions i
     with lock2:
         draw_messages(msg_win, messages)
     time.sleep(3)
-    sock = race(host, local_port, remote_port, msg_win, messages)
+    sock, is_master = race(host, local_port, remote_port, msg_win, messages)
+    role_bool = determine_role(sock, is_master)
+    peers = {}
     private_key, public_key = keygen()
-    derived_key = key_exchange(sock, private_key, public_key)
-    chat_hash = hashlib.sha256(derived_key).hexdigest()
-    trun_chat_hash = chat_hash[:6]
-    messages.append(f"<<<Your chat hash code is <{trun_chat_hash}>, ensure it matches with your peer before continuing chatting.>>>")
-    with lock2:
-        draw_messages(msg_win, messages)
-    recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
-    recv.daemon = True
-    recv.start()
-    send_loop(sock, derived_key, msg_win, input_win, lock2, messages)
+    if role_bool == True:
+        messages.append("You are the relay master now")
+        with lock2:
+            draw_messages(msg_win, messages)
+        derived_key = key_exchange(sock, private_key, public_key)
+        addr = sock.getpeername()
+        peers[addr] = {
+            "sock": sock,
+            "key": derived_key
+        }
+        relay_recver = threading.Thread(target=relay_recv, args=(sock, addr, peers, lock2, msg_win, messages))
+        peer_listener = threading.Thread(target=listen_for_peers, args=(local_port, msg_win, messages, peers, lock2))
+        relay_recver.daemon = True
+        peer_listener.daemon = True
+        relay_recver.start()
+        peer_listener.start()
+        masters_send_loop(peers, lock2, msg_win, input_win, messages)
+    else:
+        derived_key = key_exchange(sock, private_key, public_key)
+        chat_hash = hashlib.sha256(derived_key).hexdigest()
+        trun_chat_hash = chat_hash[:6]
+        messages.append(f"<<<Your chat hash code is <{trun_chat_hash}>, ensure it matches with your peer before continuing chatting.>>>")
+        with lock2:
+            draw_messages(msg_win, messages)
+        recv = threading.Thread(target=recv_loop ,args=(sock, derived_key, msg_win, lock2, messages))
+        recv.daemon = True
+        recv.start()
+        send_loop(sock, derived_key, msg_win, input_win, lock2, messages)
 
 
 curses.wrapper(lambda stdscr: main(stdscr, host, local_port, remote_port)) # lambda since the curses wrapper NEEDS the stdscr to be passed, but the user is'nt inputting that themselves, and its needed to start main too, yk?

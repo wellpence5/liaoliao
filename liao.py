@@ -102,19 +102,6 @@ def decrypt(key, data): # Decrypt Function
 
 
 
-# one peer will be the listener and the other the connecter. Depends on who is faster
-def listen(host, port, win, message): # When you debugging code nd lowkey realise that you're gay
-    server = socket.socket() 
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # When script is closed, this just tells computer to recycle the port that was being used. Normally, there is like a 30 second cooldown of some sort so this just skips it.
-    server.bind((host, port))
-    server.listen(1)
-    message.append(f"[*]Listening on {host}:{port}")
-    conn, addr = server.accept() 
-    message.append(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
-    draw_messages(win, message)
-    server.close() # THis is to stop listening if it already got a peer. Might change later to accomodate multiple peers at the same time. Groupchat sort of thing.
-    return conn
-
 def connect(host, port, win, done, message):
     while not done.is_set(): # If listen() on race, this stops connect() from running forever until its killed later by daemon.
         try:
@@ -137,14 +124,21 @@ def race(host, local_port, remote_port, win, message): # This is to launch both 
     done = threading.Event() # Threading mentioned (#*#)
 
     def listen_wrapper():
-        sock = listen("0.0.0.0", local_port, win, message)
-        result.append((sock, True))
+        server = socket.socket() 
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((host, local_port))
+        server.listen(1)
+        message.append(f"[*]Listening on {host}:{local_port}")
+        sock, addr = server.accept() 
+        message.append(f"[*]Incoming connection from {addr[0]}:{addr[1]}")
+        draw_messages(win, message)
+        result.append((sock, True, server))
         done.set()
 
     def connect_wrapper():
         sock = connect(host, remote_port, win, done, message)
         if sock:
-            result.append((sock, False))
+            result.append((sock, False, None))
             done.set()
     
         
@@ -228,11 +222,7 @@ def determine_role(sock, is_master):
             raise ConnectionError("Invalid handshake")
     return is_master
 
-def listen_for_peers(port, win, message, peers, lock):
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", port))
-    server.listen(1)
+def listen_for_peers(win, message, peers, lock, server):
     while True:
         sock, addr = server.accept()
         private_key, public_key = keygen()
@@ -302,7 +292,7 @@ def masters_send_loop(peer, lock, msg_win, input_win, message):
             if current_txt == "":
                 continue
             if current_txt == "/bye": # This is the clean exit. Realised that Ctrl + C everytime is just sloppy work
-                current_txt = "<<Your Peer has Disconnected!>>"
+                current_txt = "<<The Relay Master has left. Group has been deleted and your messages will no longer be sent.>>"
                 mass_group_send(lock, peer, msg_win, message, current_txt)  
                 with lock: 
                     for peer_addr, peer_data in peer.items():
@@ -340,8 +330,8 @@ def main(stdscr, host, local_port, remote_port): # main. Calling the functions i
     with lock2:
         draw_messages(msg_win, messages)
     time.sleep(3)
-    sock, is_master = race(host, local_port, remote_port, msg_win, messages)
-    role_bool = determine_role(sock, is_master)
+    sock, is_master, server = race(host, local_port, remote_port, msg_win, messages)
+    role_bool = is_master
     peers = {}
     private_key, public_key = keygen()
     if role_bool == True:
@@ -355,7 +345,7 @@ def main(stdscr, host, local_port, remote_port): # main. Calling the functions i
             "key": derived_key
         }
         relay_recver = threading.Thread(target=relay_recv, args=(sock, addr, peers, lock2, msg_win, messages))
-        peer_listener = threading.Thread(target=listen_for_peers, args=(local_port, msg_win, messages, peers, lock2))
+        peer_listener = threading.Thread(target=listen_for_peers, args=(msg_win, messages, peers, lock2, server))
         relay_recver.daemon = True
         peer_listener.daemon = True
         relay_recver.start()

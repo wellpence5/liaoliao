@@ -32,7 +32,3 @@ python3 liao.py 192.168.1.10 5000 5001
 Machine B:
 python3 liao.py 192.168.1.9 5001 5000
 
-## Known limitations
-- No authentication — a man-in-the-middle could intercept the key exchange
-- No message framing — may misbehave on unreliable or high-latency connections
-- No replay attack protection

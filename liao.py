@@ -15,8 +15,8 @@ import hashlib
 # Better way to parse the arguments entered.
 parser = argparse.ArgumentParser(prog="liao.py", usage="%(prog)s [host] [local_port] [remote_port]")
 parser.add_argument("host", help="The remote host you are connecting to.")
-parser.add_argument("local_port", help="The port you want to use. Recommened is 5000", type=int)
-parser.add_argument("remote_port", help="The host's port", type=int)
+parser.add_argument("--local_port", "-l", help="The port you want to use. Default is 5000", type=int, default=5000)
+parser.add_argument("--remote_port", "-r", help="The host's port. Default is 5000", type=int, default=5000)
 argus = parser.parse_args()
 host = argus.host
 local_port = argus.local_port
@@ -169,22 +169,22 @@ def recv_msg(sock):
     return recv_all(sock, length)
 
 
-def recv_loop(sock, derived_key, win, lock, messages): # Function to receive texts
-   while True:
+def recv_loop(sock, derived_key, win, lock, messages): # Function to receive texts. This is happening at the same time as the main thread(send)
+   while True: 
         try:
             recvd_rawmsg = recv_msg(sock)
             if recvd_rawmsg == None:
-                messages.append("Peer has Disconnected!")
                 with lock:
+                    messages.append("Peer has Disconnected!") # recv_loop is in a constant background thread loop btw. so putting this in prevents appending bugs
                     draw_messages(win, messages)
                 break 
             mumbl = decrypt(derived_key, recvd_rawmsg)
-            messages.append("Peer: " + mumbl.decode())
             with lock:
+                messages.append("Peer: " + mumbl.decode())
                 draw_messages(win, messages)
         except OSError:
-            messages.append("Connection Error. Peer may have disconnected.")
             with lock:
+                messages.append("Connection Error. Peer may have disconnected.")
                 draw_messages(win, messages)
             break
             
